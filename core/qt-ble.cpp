@@ -180,6 +180,7 @@ static const struct uuid_match serial_service_uuids[] = {
         { "6e400001-b5a3-f393-e0a9-e50e24dcca9e", "Nordic Semi UART" },
 	{ "00000001-8c3b-4f2c-a59e-8c08224f3253", "Halcyon Symbios" },
 	{ "84968ffe-d26d-478a-b953-5010bcf58bca", "Seac" },
+	{ "de5bf72a-d711-4e47-af26-65e3012a5dc7", "Sunroad D3 (Custom Vendor)" },
 	{ NULL, }
 };
 
@@ -341,24 +342,31 @@ dc_status_t BLEObject::write(const void *data, size_t size, size_t *actual)
 {
 	if (actual) *actual = 0;
 
-	for (const QLowEnergyCharacteristic &c: preferredService()->characteristics()) {
-		if (!is_write_characteristic(c))
+	// Loop through all discovered services to find NUS explicitly
+	for (QLowEnergyService *s : services) {
+		if (s->serviceUuid() != QBluetoothUuid(QUuid("6e400001-b5a3-f393-e0a9-e50e24dcca9e")))
 			continue;
 
-		QByteArray bytes((const char *)data, (int) size);
-		if (verbose > 2 || debugCounter < DEBUG_THRESHOLD)
-			report_info("%s packet SEND %s", current_time().c_str(), qPrintable(bytes.toHex()));
+		for (const QLowEnergyCharacteristic &c : s->characteristics()) {
+			if (!is_write_characteristic(c))
+				continue;
 
-		QLowEnergyService::WriteMode mode;
-		mode = (c.properties() & QLowEnergyCharacteristic::WriteNoResponse) ?
-				QLowEnergyService::WriteWithoutResponse :
-				QLowEnergyService::WriteWithResponse;
+			QByteArray bytes((const char *)data, (int) size);
+			if (verbose > 2 || debugCounter < DEBUG_THRESHOLD)
+				report_info("%s packet SEND %s", current_time().c_str(), qPrintable(bytes.toHex()));
 
-		preferredService()->writeCharacteristic(c, bytes, mode);
-		if (actual) *actual = size;
-		return DC_STATUS_SUCCESS;
+			QLowEnergyService::WriteMode mode;
+			mode = (c.properties() & QLowEnergyCharacteristic::WriteNoResponse) ?
+			QLowEnergyService::WriteWithoutResponse :
+			QLowEnergyService::WriteWithResponse;
+
+			s->writeCharacteristic(c, bytes, mode);
+			if (actual) *actual = size;
+			return DC_STATUS_SUCCESS;
+		}
 	}
 
+	report_error("Error: NUS Write characteristic not found.");
 	return DC_STATUS_IO;
 }
 
@@ -439,6 +447,11 @@ dc_status_t BLEObject::read(void *data, size_t size, size_t *actual)
 	return rc;
 }
 
+static bool is_sunroad(const device_data_t &d)
+{
+	return d.vendor == "Sunroad"; // Matches the vendor string defined in libdivecomputer
+}
+
 //
 // select_preferred_service() gets called after all services
 // have been discovered, and the discovery process has been
@@ -486,8 +499,13 @@ dc_status_t BLEObject::select_preferred_service()
 		}
 	}
 	if (known) {
-		services.clear();
-		services.append(known);
+		if (is_sunroad(device)) {
+			// Bypass the clear instruction to retain both NUS and Vendor services in the array
+			report_info("Sunroad device identified: Retaining multi-service allocation.");
+		} else {
+			services.clear();
+			services.append(known);
+		}
 	}
 
 	// Print out the services for debugging
@@ -539,19 +557,26 @@ dc_status_t BLEObject::select_preferred_service()
 		break;
 	}
 
-	if (!preferred) {
-		report_info("failed to find suitable service");
-		report_error("Failed to find suitable BLE GATT service");
-		return DC_STATUS_IO;
+	// Connect signals for both target services if they exist in the array
+	for (QLowEnergyService *s : services) {
+		QBluetoothUuid u = s->serviceUuid();
+		if (u == QBluetoothUuid(QUuid("6e400001-b5a3-f393-e0a9-e50e24dcca9e")) ||
+			u == QBluetoothUuid(QUuid("de5bf72a-d711-4e47-af26-65e3012a5dc7"))) {
+			connect(s, &QLowEnergyService::stateChanged, this, &BLEObject::serviceStateChanged);
+			connect(s, &QLowEnergyService::characteristicRead, this, &BLEObject::characteristcStateChanged);
+			connect(s, &QLowEnergyService::characteristicChanged, this, &BLEObject::characteristcStateChanged);
+			connect(s, &QLowEnergyService::characteristicWritten, this, &BLEObject::characteristicWritten);
+			connect(s, &QLowEnergyService::descriptorWritten, this, &BLEObject::writeCompleted);
+
+			// Set preferred to satisfy legacy pointer checks in the rest of the file
+			if (!preferred) {
+				preferred = s;
+				notify = true;
+			}
+		}
 	}
 
-	connect(preferred, &QLowEnergyService::stateChanged, this, &BLEObject::serviceStateChanged);
-	connect(preferred, &QLowEnergyService::characteristicRead, this, &BLEObject::characteristcStateChanged);
-	connect(preferred, &QLowEnergyService::characteristicChanged, this, &BLEObject::characteristcStateChanged);
-	connect(preferred, &QLowEnergyService::characteristicWritten, this, &BLEObject::characteristicWritten);
-	connect(preferred, &QLowEnergyService::descriptorWritten, this, &BLEObject::writeCompleted);
-
-	return DC_STATUS_SUCCESS;
+	return preferred ? DC_STATUS_SUCCESS : DC_STATUS_IO;
 }
 
 dc_status_t BLEObject::setHwCredit(unsigned int c)
@@ -739,36 +764,35 @@ dc_status_t qt_ble_open(void **io, dc_context_t *, const char *devaddr, device_d
 			return r;
 		}
 	} else {
-		for (const QLowEnergyCharacteristic &c: list) {
-			if (!is_notify_characteristic(c))
+		// Cast to access internal services list directly
+		for (QLowEnergyService *s : static_cast<BLEObject*>(ble)->services) {
+			QBluetoothUuid suuid = s->serviceUuid();
+			if (suuid != QBluetoothUuid(QUuid("6e400001-b5a3-f393-e0a9-e50e24dcca9e")) &&
+				suuid != QBluetoothUuid(QUuid("de5bf72a-d711-4e47-af26-65e3012a5dc7"))) {
 				continue;
-
-			report_info("Using read characteristic %s", to_str(c.uuid()).c_str());
-
-			const QList<QLowEnergyDescriptor> l = c.descriptors();
-			QLowEnergyDescriptor d = l.first();
-
-			for (const QLowEnergyDescriptor &tmp: l) {
-				if (tmp.type() == QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration) {
-					d = tmp;
-					break;
 				}
-			}
 
-			const char *value = c.properties() & QLowEnergyCharacteristic::Notify ?
-				"0100" : "0200";
+				for (const QLowEnergyCharacteristic &c : s->characteristics()) {
+					if (!is_notify_characteristic(c))
+						continue;
 
-			report_info("now writing \"0x%s\" to the descriptor %s", value, to_str(d.uuid()).c_str());
+					report_info("Enabling notifications on characteristic: %s", to_str(c.uuid()).c_str());
 
-			ble->preferredService()->writeDescriptor(d, QByteArray::fromHex(value));
-			WAITFOR(ble->descriptorWritten(), 1000);
-			if (!ble->descriptorWritten()) {
-				report_info("Bluetooth: Failed to enable notifications for characteristic %s", to_str(c.uuid()).c_str());
-				report_error("Bluetooth: Failed to enable notifications.");
-				delete ble;
-				return DC_STATUS_TIMEOUT;
-			}
-			break;
+					const QList<QLowEnergyDescriptor> l = c.descriptors();
+					QLowEnergyDescriptor d = l.first();
+
+					for (const QLowEnergyDescriptor &tmp : l) {
+						if (tmp.type() == QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration) {
+							d = tmp;
+							break;
+						}
+					}
+
+					// Reset descriptor write handshake flag
+					static_cast<BLEObject*>(ble)->desc_written = 0;
+					s->writeDescriptor(d, QByteArray::fromHex("0100"));
+					WAITFOR(ble->descriptorWritten(), 1000);
+				}
 		}
 	}
 
