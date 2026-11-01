@@ -118,7 +118,10 @@ static struct namePattern name[] = {
 	// McLean dive computers
 	{ "McLean Extreme", "McLean", "Extreme" },
 	// Tecdiving dive computers
-	{ "DiveComputer", "Tecdiving", "DiveComputer.eu" }
+	{ "DiveComputer", "Tecdiving", "DiveComputer.eu" },
+	// Sunroad dive computers (advertises as "  D3- XXXX" with two leading spaces)
+	{ "  D3-", "Sunroad", "D3" },
+	{ "D3-", "Sunroad", "D3" }
 };
 
 static dc_descriptor_t *getDeviceType(QString btName)

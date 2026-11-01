@@ -173,6 +173,7 @@ static const char *match_uuid_list(const QBluetoothUuid &match, const struct uui
 // Oh. It did, didn't it?
 //
 static const struct uuid_match serial_service_uuids[] = {
+	{ "de5bf728-d711-4e47-af26-65e3012a5dc7", "Sunroad D3" },
 	{ "0000fefb-0000-1000-8000-00805f9b34fb", "Heinrichs-Weikamp (Telit/Stollmann)" },
 	{ "2456e1b9-26e2-8f83-e744-f34f01e9d701", "Heinrichs-Weikamp (U-Blox)" },
 	{ "544e326b-5b72-c6b0-1c46-41c1bc448118", "Mares BlueLink Pro" },
